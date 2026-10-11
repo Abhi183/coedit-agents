@@ -13,6 +13,7 @@ from .regions import resolve_symbol
 from .store import LeaseConflict, Store
 
 DEFAULT_TTL = 15 * 60  # seconds; agents heartbeat by re-claiming or calling renew
+MAX_TTL = 24 * 60 * 60
 STATE_DIR = ".coedit"
 
 
@@ -26,8 +27,18 @@ class Coordinator:
 
     # ---- region helpers -------------------------------------------------
 
+    def _normalize(self, path: str) -> Optional[str]:
+        """Root-relative POSIX path, or None if it escapes the repository (incl. via symlink)."""
+        target = (self.root / path).resolve()
+        if not target.is_relative_to(self.root):
+            return None
+        return target.relative_to(self.root).as_posix()
+
     def _read_file(self, path: str) -> Optional[str]:
-        target = (self.root / path)
+        rel = self._normalize(path)
+        if rel is None:
+            return None
+        target = self.root / rel
         if not target.is_file():
             return None
         try:
@@ -37,6 +48,12 @@ class Coordinator:
 
     def _resolve_region(self, path: str, symbol: Optional[str], start_line: Optional[int],
                         end_line: Optional[int]) -> Region | dict[str, Any]:
+        rel = self._normalize(path)
+        if rel is None:
+            return {"ok": False, "error": f"path is outside repository: {path}"}
+        path = rel
+        if (start_line is None) != (end_line is None):
+            return {"ok": False, "error": "give both start_line and end_line, or neither"}
         if symbol:
             source = self._read_file(path)
             if source is None:
@@ -45,7 +62,7 @@ class Coordinator:
             if span is None:
                 return {"ok": False, "error": f"symbol `{symbol}` not found in {path}"}
             return Region(path, span.start_line, span.end_line, symbol)
-        if start_line and end_line:
+        if start_line is not None and end_line is not None:
             if start_line > end_line or start_line < 1:
                 return {"ok": False, "error": "start_line must be >= 1 and <= end_line"}
             return Region(path, start_line, end_line)
@@ -58,9 +75,12 @@ class Coordinator:
               ttl: float = DEFAULT_TTL) -> dict[str, Any]:
         if not intent.strip():
             return {"ok": False, "error": "intent is required: say what you are about to do"}
+        if not 0 < ttl <= MAX_TTL:
+            return {"ok": False, "error": f"ttl must be between 1 and {MAX_TTL} seconds"}
         region = self._resolve_region(path, symbol, start_line, end_line)
         if isinstance(region, dict):
             return region
+        path = region.path
         others = [l for l in self.store.active_leases(path=path) if l.agent != self.agent]
         verdict = classify(region, others, source=self._read_file(path))
         try:
@@ -76,16 +96,24 @@ class Coordinator:
         return result
 
     def renew(self, lease_id: str, ttl: float = DEFAULT_TTL) -> dict[str, Any]:
-        self.store.heartbeat(lease_id, ttl)
-        return {"ok": True, "lease_id": lease_id, "ttl": ttl}
+        if not 0 < ttl <= MAX_TTL:
+            return {"ok": False, "error": f"ttl must be between 1 and {MAX_TTL} seconds"}
+        if self.store.heartbeat(lease_id, ttl, agent=self.agent):
+            return {"ok": True, "lease_id": lease_id, "ttl": ttl}
+        return {"ok": False, "error": "lease is not yours, already released, or expired; claim again"}
 
     def release(self, lease_id: Optional[str] = None) -> dict[str, Any]:
         if lease_id:
-            self.store.release(lease_id)
-            return {"ok": True, "released": 1}
+            if self.store.release(lease_id, agent=self.agent):
+                return {"ok": True, "released": 1}
+            return {"ok": False, "error": "lease is not yours or already released"}
         return {"ok": True, "released": self.store.release_all(self.agent)}
 
     def read(self, path: str) -> str:
+        rel = self._normalize(path)
+        if rel is None:
+            return f"[coedit] path is outside repository: {path}"
+        path = rel
         source = self._read_file(path)
         if source is None:
             return f"[coedit] file not found or unreadable: {path}"
@@ -98,6 +126,7 @@ class Coordinator:
         region = self._resolve_region(path, symbol, start_line, end_line)
         if isinstance(region, dict):
             return region
+        path = region.path
         others = [l for l in self.store.active_leases(path=path) if l.agent != self.agent]
         verdict = classify(region, others, source=self._read_file(path))
         symbols = (symbol,) if symbol else ()

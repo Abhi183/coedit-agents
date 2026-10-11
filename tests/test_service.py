@@ -70,3 +70,40 @@ def test_claim_unknown_symbol_errors(repo):
     alice = Coordinator(repo, "alice")
     result = alice.claim("app.py", intent="x", symbol="nope", ttl=60)
     assert not result["ok"] and "not found" in result["error"]
+
+
+def test_read_refuses_paths_outside_repo(repo):
+    alice = Coordinator(repo, "alice")
+    assert "outside repository" in alice.read("/etc/hosts")
+    assert "outside repository" in alice.read("../../etc/hosts")
+
+
+def test_paths_are_normalized_so_leases_cannot_be_bypassed(repo):
+    alice, bob = Coordinator(repo, "alice"), Coordinator(repo, "bob")
+    alice.claim("app.py", intent="x", start_line=1, end_line=2)
+    result = bob.claim("./app.py", intent="y", start_line=1, end_line=2)
+    assert not result["ok"]
+    result = bob.claim(str(repo / "app.py"), intent="y", start_line=1, end_line=2)
+    assert not result["ok"]
+
+
+def test_only_holder_can_release_or_renew(repo):
+    alice, bob = Coordinator(repo, "alice"), Coordinator(repo, "bob")
+    lease_id = alice.claim("app.py", intent="x", symbol="load")["lease"]["id"]
+    assert not bob.release(lease_id)["ok"]
+    assert not bob.renew(lease_id)["ok"]
+    assert alice.renew(lease_id)["ok"]
+    assert alice.release(lease_id)["ok"]
+    assert not alice.renew(lease_id)["ok"], "renewing a released lease fails"
+
+
+def test_partial_line_range_is_an_error(repo):
+    alice = Coordinator(repo, "alice")
+    result = alice.claim("app.py", intent="x", start_line=5)
+    assert not result["ok"] and "both" in result["error"]
+
+
+def test_ttl_is_validated(repo):
+    alice = Coordinator(repo, "alice")
+    assert not alice.claim("app.py", intent="x", ttl=0)["ok"]
+    assert not alice.claim("app.py", intent="x", ttl=10**9)["ok"]

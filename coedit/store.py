@@ -89,15 +89,25 @@ class Store:
             conn.execute("COMMIT")
         return lease
 
-    def heartbeat(self, lease_id: str, ttl: float, now: Optional[float] = None) -> None:
+    def heartbeat(self, lease_id: str, ttl: float, now: Optional[float] = None,
+                  agent: Optional[str] = None) -> bool:
+        """Extend a live lease. Returns False if it is unknown, expired, released,
+        or (when `agent` is given) held by someone else. An expired lease can not be
+        revived, because another agent may have claimed the region in the meantime."""
         now = time.time() if now is None else now
         with self._connect() as conn:
-            conn.execute("UPDATE leases SET expires_at = ? WHERE id = ? AND released = 0",
-                         (now + ttl, lease_id))
+            cur = conn.execute(
+                "UPDATE leases SET expires_at = ? WHERE id = ? AND released = 0 "
+                "AND expires_at > ? AND (? IS NULL OR agent = ?)",
+                (now + ttl, lease_id, now, agent, agent))
+            return cur.rowcount == 1
 
-    def release(self, lease_id: str) -> None:
+    def release(self, lease_id: str, agent: Optional[str] = None) -> bool:
         with self._connect() as conn:
-            conn.execute("UPDATE leases SET released = 1 WHERE id = ?", (lease_id,))
+            cur = conn.execute(
+                "UPDATE leases SET released = 1 WHERE id = ? AND released = 0 "
+                "AND (? IS NULL OR agent = ?)", (lease_id, agent, agent))
+            return cur.rowcount == 1
 
     def release_all(self, agent: str) -> int:
         with self._connect() as conn:

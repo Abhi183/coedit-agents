@@ -58,3 +58,16 @@ def test_two_store_handles_share_state(tmp_path):
     b = Store(tmp_path / "s.db")
     a.claim("alice", Region(path="z.py"), "x", ttl=60, now=0.0)
     assert b.active_leases(now=1.0)[0].agent == "alice"
+
+
+def test_heartbeat_cannot_revive_expired_lease(store):
+    lease = store.claim("alice", Region(path="a.py"), "x", ttl=10, now=0.0)
+    store.claim("bob", Region(path="a.py"), "y", ttl=100, now=11.0)
+    assert not store.heartbeat(lease.id, ttl=100, now=12.0, agent="alice")
+    assert [l.agent for l in store.active_leases(now=13.0)] == ["bob"]
+
+
+def test_release_checks_owner(store):
+    lease = store.claim("alice", Region(path="a.py"), "x", ttl=10, now=0.0)
+    assert not store.release(lease.id, agent="bob")
+    assert store.release(lease.id, agent="alice")
